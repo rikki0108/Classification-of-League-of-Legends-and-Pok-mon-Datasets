@@ -1,0 +1,595 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV, learning_curve, cross_val_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import roc_auc_score, confusion_matrix, f1_score, accuracy_score
+from sklearn.feature_selection import SelectFromModel
+from sklearn.preprocessing import OneHotEncoder
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import gc
+import time
+
+# Set random seed for reproducibility
+np.random.seed(42)
+
+# Create output directory for plots
+if not os.path.exists('plots'):
+    os.makedirs('plots')
+
+# Plot confusion matrix
+def plot_confusion_matrix(cm, classes, title, filename):
+    try:
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
+        plt.title(title)
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        full_path = os.path.join('plots', filename)
+        plt.savefig(full_path)
+        print(f"Saved plot: {full_path}")
+        plt.clf()
+    except Exception as e:
+        print(f"Error saving plot {filename}: {e}")
+
+# Analyze confusion matrix
+def analyze_confusion_matrix(cm, classes):
+    analysis = []
+    total_samples = np.sum(cm)
+    correct_predictions = np.sum(np.diag(cm))
+    overall_accuracy = (correct_predictions / total_samples) * 100
+    analysis.append(f"Overall Accuracy: {overall_accuracy:.2f}%")
+    analysis.append(f"Total Samples: {total_samples}, Correct Predictions: {correct_predictions}\n")
+    for i, class_name in enumerate(classes):
+        true_samples = np.sum(cm[i, :])
+        predicted_samples = np.sum(cm[:, i])
+        correct = cm[i, i]
+        per_class_accuracy = (correct / true_samples * 100) if true_samples > 0 else 0
+        analysis.append(f"Class {class_name}:")
+        analysis.append(f"  True Samples: {true_samples}, Predicted Samples: {predicted_samples}, Correct: {correct}")
+        analysis.append(f"  Per-class Accuracy: {per_class_accuracy:.2f}%")
+        misclassified = [(classes[j], cm[i, j]) for j in range(len(classes)) if j != i and cm[i, j] > 0]
+        if misclassified:
+            analysis.append(f"  Misclassified as: {', '.join([f'{cls} ({num})' for cls, num in misclassified])}")
+        else:
+            analysis.append("  No misclassifications")
+        analysis.append("")
+    return "\n".join(analysis)
+
+# Plot learning curve
+def plot_learning_curve(estimator, X, y, title, filename, cv=5, scoring='f1_weighted', train_sizes=np.linspace(0.1, 1.0, 10)):
+    try:
+        train_sizes, train_scores, val_scores = learning_curve(
+            estimator, X, y, cv=cv, scoring=scoring, train_sizes=train_sizes, n_jobs=-1, random_state=42
+        )
+        train_mean = np.mean(train_scores, axis=1)
+        train_std = np.std(train_scores, axis=1)
+        val_mean = np.mean(val_scores, axis=1)
+        val_std = np.std(val_scores, axis=1)
+        plt.figure(figsize=(10, 8))
+        plt.plot(train_sizes, train_mean, label='Training score', color='blue')
+        plt.plot(train_sizes, val_mean, label='Cross-validation score', color='orange')
+        plt.fill_between(train_sizes, train_mean - train_std, train_mean + train_std, alpha=0.1, color='blue')
+        plt.fill_between(train_sizes, val_mean - val_std, val_mean + val_std, alpha=0.1, color='orange')
+        plt.title(title)
+        plt.xlabel('Training Examples')
+        plt.ylabel(scoring)
+        plt.legend(loc='best')
+        plt.grid(True)
+        full_path = os.path.join('plots', filename)
+        plt.savefig(full_path)
+        print(f"Saved learning curve: {full_path}")
+        plt.clf()
+        return train_sizes, train_mean, val_mean
+    except Exception as e:
+        print(f"Error saving learning curve {filename}: {e}")
+        return None, None, None
+
+# Plot feature importance
+def plot_feature_importance(model, features, title, filename):
+    try:
+        importances = model.feature_importances_
+        indices = np.argsort(importances)[::-1]
+        plt.figure(figsize=(10, 8))
+        plt.bar(range(len(features)), importances[indices], align='center')
+        plt.xticks(range(len(features)), [features[i] for i in indices], rotation=45)
+        plt.title(title)
+        plt.xlabel('Feature')
+        plt.ylabel('Importance')
+        full_path = os.path.join('plots', filename)
+        plt.savefig(full_path)
+        print(f"Saved feature importance: {full_path}")
+        plt.clf()
+    except Exception as e:
+        print(f"Error saving feature importance {filename}: {e}")
+
+# Plot tuning comparison
+def plot_tuning_comparison(before_scores, after_scores, models, title, filename, metric='Score'):
+    try:
+        x = np.arange(len(models))
+        width = 0.35
+        plt.figure(figsize=(10, 8))
+        plt.bar(x - width/2, before_scores, width, label='Before Tuning', color='blue')
+        plt.bar(x + width/2, after_scores, width, label='After Tuning', color='orange')
+        plt.xlabel('Model')
+        plt.ylabel(metric)
+        plt.title(title)
+        plt.xticks(x, models, rotation=45)
+        plt.legend()
+        full_path = os.path.join('plots', filename)
+        plt.savefig(full_path)
+        print(f"Saved tuning comparison: {full_path}")
+        plt.clf()
+    except Exception as e:
+        print(f"Error saving tuning comparison {filename}: {e}")
+
+# Plot hyperparameter tuning curve
+def plot_param_tuning(grid, param_name, title, filename, scoring):
+    try:
+        results = pd.DataFrame(grid.cv_results_)
+        param_values = results[f'param_{param_name}'].astype(str)
+        mean_scores = results['mean_test_score']
+        std_scores = results['std_test_score']
+        plt.figure(figsize=(10, 8))
+        plt.plot(param_values, mean_scores, marker='o', label='Mean CV Score')
+        plt.fill_between(param_values, mean_scores - std_scores, mean_scores + std_scores, alpha=0.1)
+        plt.title(title)
+        plt.xlabel(param_name)
+        plt.ylabel(f'Mean CV {scoring}')
+        plt.legend()
+        plt.grid(True)
+        full_path = os.path.join('plots', filename)
+        plt.savefig(full_path)
+        print(f"Saved param tuning plot: {full_path}")
+        plt.clf()
+    except Exception as e:
+        print(f"Error saving param tuning plot {filename}: {e}")
+
+# Load and preprocess League of Legends dataset
+def load_league_data():
+    try:
+        train_path = '/content/lol_train.csv'
+        test_path = '/content/lol_test.csv'
+        train_data = pd.read_csv(train_path).sample(frac=0.1, random_state=42)
+        test_data = pd.read_csv(test_path).sample(frac=0.1, random_state=42)
+        print("League of Legends train columns:", train_data.columns.tolist())
+        print("League of Legends test columns:", test_data.columns.tolist())
+
+        features = ['firstblood', 'firsttower', 'firstinhib', 'firstbaron', 'firstdragon',
+                    'firstharry', 'towerkills', 'inhibkills', 'baronkills', 'dragonkills', 'harrykills']
+        print("Missing values in League features:", train_data[features].isnull().sum())
+        plt.figure(figsize=(10, 8))
+        train_data['harrykills'].hist(bins=30)
+        plt.title('Distribution of harrykills')
+        plt.xlabel('harrykills')
+        plt.ylabel('Frequency')
+        full_path = os.path.join('plots', 'league_harrykills_hist.png')
+        plt.savefig(full_path)
+        print(f"Saved histogram: {full_path}")
+        plt.clf()
+
+        X_train = train_data[features]
+        y_train = train_data['win']
+        X_test = test_data[features]
+        y_test = test_data['win']
+
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+        print(f"League of Legends: X_train shape {X_train.shape}, X_test shape {X_test.shape}")
+        return X_train, X_test, y_train, y_test, features
+    except Exception as e:
+        print(f"Error loading League of Legends data: {e}")
+        raise
+
+# Load Pokémon dataset with feature selection
+def load_pokemon_data():
+    try:
+        train_path = '/content/poke_train.csv'
+        test_path = '/content/poke_test.csv'
+        train_data = pd.read_csv(train_path)
+        test_data = pd.read_csv(test_path)
+
+        print("Pokémon train columns and types:\n", train_data.dtypes)
+        print("Pokémon test columns and types:\n", test_data.dtypes)
+
+        # Define numerical features (update with your actual features)
+        numerical_features = [
+            'HP', 'Attack', 'Defense', 'Sp. Atk', 'Sp. Def', 'Speed', 'Total', 'Generation',
+            # Placeholder for additional numerical features
+            'Feature9', 'Feature10', 'Feature11', 'Feature12', 'Feature13',
+            'Feature14', 'Feature15', 'Feature16', 'Feature17', 'Feature18'
+        ]
+
+        available_numerical = [col for col in numerical_features if col in train_data.columns]
+        if len(available_numerical) < len(numerical_features):
+            print("Warning: Some numerical features not found. Available numerical features:", available_numerical)
+
+        categorical_features = ['Type 2'] if 'Type 2' in train_data.columns else []
+        features = available_numerical + categorical_features
+        if not all(col in train_data.columns for col in features):
+            missing_cols = [col for col in features if col not in train_data.columns]
+            raise ValueError(f"Missing columns in dataset: {missing_cols}")
+
+        X_train = train_data[features]
+        y_train = train_data['Type 1']
+        X_test = test_data[features]
+        y_test = test_data['Type 1']
+
+        if categorical_features:
+            encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+            X_train_cat = encoder.fit_transform(X_train[categorical_features])
+            X_test_cat = encoder.transform(X_test[categorical_features])
+            cat_feature_names = encoder.get_feature_names_out(categorical_features)
+            X_train_num = X_train[available_numerical].values
+            X_test_num = X_test[available_numerical].values
+            X_train = np.hstack([X_train_num, X_train_cat])
+            X_test = np.hstack([X_test_num, X_test_cat])
+            features = available_numerical + list(cat_feature_names)
+        else:
+            X_train = X_train[available_numerical].values
+            X_test = X_test[available_numerical].values
+            features = available_numerical
+
+        class_counts = y_train.value_counts()
+        print("Class distribution:\n", class_counts)
+        low_sample_classes = class_counts[class_counts < 10].index
+        if low_sample_classes.any():
+            print("Merging classes with <10 samples into 'Other'")
+            y_train = y_train.where(~y_train.isin(low_sample_classes), 'Other')
+            y_test = y_test.where(~y_test.isin(low_sample_classes), 'Other')
+
+        rf = RandomForestClassifier(random_state=42)
+        rf.fit(X_train, y_train)
+        importances = rf.feature_importances_
+        indices = np.argsort(importances)[::-1][:10]
+        selected_features = np.array(features)[indices]
+        print("Selected features:", selected_features)
+        X_train = X_train[:, indices]
+        X_test = X_test[:, indices]
+
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+        print(f"Pokémon: X_train shape {X_train.shape}, X_test shape {X_test.shape}")
+        return X_train, X_test, y_train, y_test, selected_features
+    except Exception as e:
+        print(f"Error loading Pokémon data: {e}")
+        raise
+
+# League of Legends: Binary Classification
+def train_league_models(X_train, X_test, y_train, y_test, features):
+    results = []
+    models = []
+    before_scores_roc = []
+    after_scores_roc = []
+    before_scores_acc = []
+    after_scores_acc = []
+    model_names = []
+
+    print("Training Logistic Regression...")
+    lr_default = LogisticRegression(class_weight='balanced', random_state=42)
+    start_time = time.time()
+    lr_default.fit(X_train, y_train)
+    train_time = time.time() - start_time
+    lr_default_train_pred = lr_default.predict_proba(X_train)[:, 1]
+    lr_default_test_pred = lr_default.predict_proba(X_test)[:, 1]
+    lr_default_train_roc_auc = roc_auc_score(y_train, lr_default_train_pred)
+    lr_default_test_roc_auc = roc_auc_score(y_test, lr_default_test_pred)
+    lr_default_train_acc = accuracy_score(y_train, lr_default.predict(X_train))
+    lr_default_test_acc = accuracy_score(y_test, lr_default.predict(X_test))
+    lr_params = {'C': [0.1, 1, 10], 'penalty': ['l2'], 'solver': ['liblinear']}
+    lr_grid = GridSearchCV(LogisticRegression(class_weight='balanced', random_state=42), lr_params, cv=5, scoring='roc_auc')
+    lr_grid.fit(X_train, y_train)
+    lr_best = lr_grid.best_estimator_
+    lr_test_pred = lr_best.predict(X_test)
+    lr_test_proba = lr_best.predict_proba(X_test)[:, 1]
+    lr_train_roc_auc = roc_auc_score(y_train, lr_best.predict_proba(X_train)[:, 1])
+    lr_test_roc_auc = roc_auc_score(y_test, lr_test_proba)
+    lr_train_acc = accuracy_score(y_train, lr_best.predict(X_train))
+    lr_test_acc = accuracy_score(y_test, lr_test_pred)
+    lr_cm = confusion_matrix(y_test, lr_test_pred)
+    plot_confusion_matrix(lr_cm, ['Loss', 'Win'], 'Logistic Regression Confusion Matrix', 'league_lr_cm.png')
+    lr_cm_analysis = analyze_confusion_matrix(lr_cm, ['Loss', 'Win'])
+    print("Logistic Regression Confusion Matrix Analysis:\n", lr_cm_analysis)
+    plot_param_tuning(lr_grid, 'C', 'Logistic Regression C Tuning (League)', 'league_lr_c_tuning.png', 'ROC-AUC')
+    lr_cv_scores = cross_val_score(lr_best, X_train, y_train, cv=5, scoring='roc_auc')
+    print("Logistic Regression CV ROC-AUC Scores:", lr_cv_scores, "Mean:", lr_cv_scores.mean(), "Std:", lr_cv_scores.std())
+    results.append(('Logistic Regression', lr_grid.best_params_, lr_train_roc_auc, lr_test_roc_auc, lr_train_acc, lr_test_acc, train_time, lr_cm))
+    models.append(('Logistic Regression', lr_best))
+    before_scores_roc.append(lr_default_test_roc_auc)
+    after_scores_roc.append(lr_test_roc_auc)
+    before_scores_acc.append(lr_default_test_acc)
+    after_scores_acc.append(lr_test_acc)
+    model_names.append('Logistic Regression')
+
+    print("Training Random Forest...")
+    rf_default = RandomForestClassifier(class_weight='balanced', random_state=42)
+    start_time = time.time()
+    rf_default.fit(X_train, y_train)
+    train_time = time.time() - start_time
+    rf_default_train_pred = rf_default.predict_proba(X_train)[:, 1]
+    rf_default_test_pred = rf_default.predict_proba(X_test)[:, 1]
+    rf_default_train_roc_auc = roc_auc_score(y_train, rf_default_train_pred)
+    rf_default_test_roc_auc = roc_auc_score(y_test, rf_default_test_pred)
+    rf_default_train_acc = accuracy_score(y_train, rf_default.predict(X_train))
+    rf_default_test_acc = accuracy_score(y_test, rf_default.predict(X_test))
+    rf_params = {'n_estimators': [50, 100], 'max_depth': [10, 20]}
+    rf_grid = GridSearchCV(RandomForestClassifier(class_weight='balanced', random_state=42), rf_params, cv=5, scoring='roc_auc')
+    rf_grid.fit(X_train, y_train)
+    rf_best = rf_grid.best_estimator_
+    rf_test_pred = rf_best.predict(X_test)
+    rf_test_proba = rf_best.predict_proba(X_test)[:, 1]
+    rf_train_roc_auc = roc_auc_score(y_train, rf_best.predict_proba(X_train)[:, 1])
+    rf_test_roc_auc = roc_auc_score(y_test, rf_test_proba)
+    rf_train_acc = accuracy_score(y_train, rf_best.predict(X_train))
+    rf_test_acc = accuracy_score(y_test, rf_test_pred)
+    rf_cm = confusion_matrix(y_test, rf_test_pred)
+    plot_confusion_matrix(rf_cm, ['Loss', 'Win'], 'Random Forest Confusion Matrix', 'league_rf_cm.png')
+    rf_cm_analysis = analyze_confusion_matrix(rf_cm, ['Loss', 'Win'])
+    print("Random Forest Confusion Matrix Analysis:\n", rf_cm_analysis)
+    plot_feature_importance(rf_best, features, 'Random Forest Feature Importance (League)', 'league_rf_feature_importance.png')
+    plot_param_tuning(rf_grid, 'max_depth', 'Random Forest Max Depth Tuning (League)', 'league_rf_max_depth_tuning.png', 'ROC-AUC')
+    rf_cv_scores = cross_val_score(rf_best, X_train, y_train, cv=5, scoring='roc_auc')
+    print("Random Forest CV ROC-AUC Scores:", rf_cv_scores, "Mean:", rf_cv_scores.mean(), "Std:", rf_cv_scores.std())
+    results.append(('Random Forest', rf_grid.best_params_, rf_train_roc_auc, rf_test_roc_auc, rf_train_acc, rf_test_acc, train_time, rf_cm))
+    models.append(('Random Forest', rf_best))
+    before_scores_roc.append(rf_default_test_roc_auc)
+    after_scores_roc.append(rf_test_roc_auc)
+    before_scores_acc.append(rf_default_test_acc)
+    after_scores_acc.append(rf_test_acc)
+    model_names.append('Random Forest')
+
+    print("Training SVM...")
+    svm_default = SVC(probability=True, class_weight='balanced', random_state=42)
+    start_time = time.time()
+    svm_default.fit(X_train, y_train)
+    train_time = time.time() - start_time
+    svm_default_train_pred = svm_default.predict_proba(X_train)[:, 1]
+    svm_default_test_pred = svm_default.predict_proba(X_test)[:, 1]
+    svm_default_train_roc_auc = roc_auc_score(y_train, svm_default_train_pred)
+    svm_default_test_roc_auc = roc_auc_score(y_test, svm_default_test_pred)
+    svm_default_train_acc = accuracy_score(y_train, svm_default.predict(X_train))
+    svm_default_test_acc = accuracy_score(y_test, svm_default.predict(X_test))
+    svm_params = {'C': [0.1, 1], 'kernel': ['rbf']}
+    svm_grid = GridSearchCV(SVC(probability=True, class_weight='balanced', random_state=42), svm_params, cv=5, scoring='roc_auc')
+    svm_grid.fit(X_train, y_train)
+    svm_best = svm_grid.best_estimator_
+    svm_test_pred = svm_best.predict(X_test)
+    svm_test_proba = svm_best.predict_proba(X_test)[:, 1]
+    svm_train_roc_auc = roc_auc_score(y_train, svm_best.predict_proba(X_train)[:, 1])
+    svm_test_roc_auc = roc_auc_score(y_test, svm_test_proba)
+    svm_train_acc = accuracy_score(y_train, svm_best.predict(X_train))
+    svm_test_acc = accuracy_score(y_test, svm_test_pred)
+    svm_cm = confusion_matrix(y_test, svm_test_pred)
+    plot_confusion_matrix(svm_cm, ['Loss', 'Win'], 'SVM Confusion Matrix', 'league_svm_cm.png')
+    svm_cm_analysis = analyze_confusion_matrix(svm_cm, ['Loss', 'Win'])
+    print("SVM Confusion Matrix Analysis:\n", svm_cm_analysis)
+    plot_param_tuning(svm_grid, 'C', 'SVM C Tuning (League)', 'league_svm_c_tuning.png', 'ROC-AUC')
+    svm_cv_scores = cross_val_score(svm_best, X_train, y_train, cv=5, scoring='roc_auc')
+    print("SVM CV ROC-AUC Scores:", svm_cv_scores, "Mean:", svm_cv_scores.mean(), "Std:", svm_cv_scores.std())
+    results.append(('SVM', svm_grid.best_params_, svm_train_roc_auc, svm_test_roc_auc, svm_train_acc, svm_test_acc, train_time, svm_cm))
+    models.append(('SVM', svm_best))
+    before_scores_roc.append(svm_default_test_roc_auc)
+    after_scores_roc.append(svm_test_roc_auc)
+    before_scores_acc.append(svm_default_test_acc)
+    after_scores_acc.append(svm_test_acc)
+    model_names.append('SVM')
+
+    print("Training Voting Classifier...")
+    voting_clf = VotingClassifier(
+        estimators=[('lr', lr_best), ('rf', rf_best), ('svm', svm_best)],
+        voting='soft',
+        weights=[1, 1, 1]
+    )
+    start_time = time.time()
+    voting_clf.fit(X_train, y_train)
+    train_time = time.time() - start_time
+    voting_test_pred = voting_clf.predict(X_test)
+    voting_test_proba = voting_clf.predict_proba(X_test)[:, 1]
+    voting_train_roc_auc = roc_auc_score(y_train, voting_clf.predict_proba(X_train)[:, 1])
+    voting_test_roc_auc = roc_auc_score(y_test, voting_test_proba)
+    voting_train_acc = accuracy_score(y_train, voting_clf.predict(X_train))
+    voting_test_acc = accuracy_score(y_test, voting_test_pred)
+    voting_cm = confusion_matrix(y_test, voting_test_pred)
+    plot_confusion_matrix(voting_cm, ['Loss', 'Win'], 'Voting Classifier Confusion Matrix', 'league_voting_cm.png')
+    voting_cm_analysis = analyze_confusion_matrix(voting_cm, ['Loss', 'Win'])
+    print("Voting Classifier Confusion Matrix Analysis:\n", voting_cm_analysis)
+    plot_learning_curve(voting_clf, X_train, y_train, 'Voting Classifier Learning Curve', 'league_voting_learning_curve.png', cv=5, scoring='roc_auc')
+    voting_cv_scores = cross_val_score(voting_clf, X_train, y_train, cv=5, scoring='roc_auc')
+    print("Voting Classifier CV ROC-AUC Scores:", voting_cv_scores, "Mean:", voting_cv_scores.mean(), "Std:", voting_cv_scores.std())
+    results.append(('Voting Classifier', {'voting': 'soft', 'weights': [1, 1, 1]}, voting_train_roc_auc, voting_test_roc_auc, voting_train_acc, voting_test_acc, train_time, voting_cm))
+    models.append(('Voting Classifier', voting_clf))
+    before_scores_roc.append(voting_test_roc_auc)
+    after_scores_roc.append(voting_test_roc_auc)
+    before_scores_acc.append(voting_test_acc)
+    after_scores_acc.append(voting_test_acc)
+    model_names.append('Voting Classifier')
+
+    plot_tuning_comparison(before_scores_roc, after_scores_roc, model_names, 'League of Legends ROC-AUC Tuning Comparison', 'league_tuning_comparison_roc.png', metric='ROC-AUC')
+    plot_tuning_comparison(before_scores_acc, after_scores_acc, model_names, 'League of Legends Accuracy Tuning Comparison', 'league_tuning_comparison_acc.png', metric='Accuracy')
+
+    print("League training complete!")
+    with open('plots/league_results.txt', 'w') as f:
+        for model, params, train_roc, test_roc, train_acc, test_acc, train_time, cm in results:
+            f.write(f'{model}:\nBest Params: {params}\nTrain ROC-AUC: {train_roc:.3f}\nTest ROC-AUC: {test_roc:.3f}\nTrain Accuracy: {train_acc:.3f}\nTest Accuracy: {test_acc:.3f}\nTrain Time: {train_time:.3f}s\nConfusion Matrix:\n{cm}\n\n')
+    return results
+
+# Pokémon: Multi-class Classification
+def train_pokemon_models(X_train, X_test, y_train, y_test, features):
+    results = []
+    models = []
+    before_scores_f1 = []
+    after_scores_f1 = []
+    before_scores_acc = []
+    after_scores_acc = []
+    model_names = []
+
+    print("Training Logistic Regression...")
+    lr_default = LogisticRegression(multi_class='ovr', class_weight='balanced', random_state=42)
+    start_time = time.time()
+    lr_default.fit(X_train, y_train)
+    train_time = time.time() - start_time
+    lr_default_train_pred = lr_default.predict(X_train)
+    lr_default_test_pred = lr_default.predict(X_test)
+    lr_default_train_f1 = f1_score(y_train, lr_default_train_pred, average='weighted')
+    lr_default_test_f1 = f1_score(y_test, lr_default_test_pred, average='weighted')
+    lr_default_train_acc = accuracy_score(y_train, lr_default_train_pred)
+    lr_default_test_acc = accuracy_score(y_test, lr_default_test_pred)
+    lr_params = {'C': [0.1, 1, 10], 'penalty': ['l2'], 'solver': ['liblinear']}
+    lr_grid = GridSearchCV(LogisticRegression(multi_class='ovr', class_weight='balanced', random_state=42), lr_params, cv=5, scoring='f1_weighted')
+    lr_grid.fit(X_train, y_train)
+    lr_best = lr_grid.best_estimator_
+    lr_test_pred = lr_best.predict(X_test)
+    lr_train_f1 = f1_score(y_train, lr_best.predict(X_train), average='weighted')
+    lr_test_f1 = f1_score(y_test, lr_test_pred, average='weighted')
+    lr_train_acc = accuracy_score(y_train, lr_best.predict(X_train))
+    lr_test_acc = accuracy_score(y_test, lr_test_pred)
+    lr_cm = confusion_matrix(y_test, lr_test_pred)
+    plot_confusion_matrix(lr_cm, sorted(y_test.unique()), 'Logistic Regression Confusion Matrix', 'pokemon_lr_cm.png')
+    lr_cm_analysis = analyze_confusion_matrix(lr_cm, sorted(y_test.unique()))
+    print("Logistic Regression Confusion Matrix Analysis:\n", lr_cm_analysis)
+    plot_param_tuning(lr_grid, 'C', 'Logistic Regression C Tuning (Pokémon)', 'pokemon_lr_c_tuning.png', 'F1 Score')
+    lr_cv_scores = cross_val_score(lr_best, X_train, y_train, cv=5, scoring='f1_weighted')
+    print("Logistic Regression CV F1 Scores:", lr_cv_scores, "Mean:", lr_cv_scores.mean(), "Std:", lr_cv_scores.std())
+    results.append(('Logistic Regression', lr_grid.best_params_, lr_train_f1, lr_test_f1, lr_train_acc, lr_test_acc, train_time, lr_cm))
+    models.append(('Logistic Regression', lr_best))
+    before_scores_f1.append(lr_default_test_f1)
+    after_scores_f1.append(lr_test_f1)
+    before_scores_acc.append(lr_default_test_acc)
+    after_scores_acc.append(lr_test_acc)
+    model_names.append('Logistic Regression')
+
+    print("Training Random Forest...")
+    rf_default = RandomForestClassifier(class_weight='balanced', random_state=42)
+    start_time = time.time()
+    rf_default.fit(X_train, y_train)
+    train_time = time.time() - start_time
+    rf_default_train_pred = rf_default.predict(X_train)
+    rf_default_test_pred = rf_default.predict(X_test)
+    rf_default_train_f1 = f1_score(y_train, rf_default_train_pred, average='weighted')
+    rf_default_test_f1 = f1_score(y_test, rf_default_test_pred, average='weighted')
+    rf_default_train_acc = accuracy_score(y_train, rf_default_train_pred)
+    rf_default_test_acc = accuracy_score(y_test, rf_default_test_pred)
+    rf_params = {'n_estimators': [50, 100], 'max_depth': [10, 20]}
+    rf_grid = GridSearchCV(RandomForestClassifier(class_weight='balanced', random_state=42), rf_params, cv=5, scoring='f1_weighted')
+    rf_grid.fit(X_train, y_train)
+    rf_best = rf_grid.best_estimator_
+    rf_test_pred = rf_best.predict(X_test)
+    rf_train_f1 = f1_score(y_train, rf_best.predict(X_train), average='weighted')
+    rf_test_f1 = f1_score(y_test, rf_test_pred, average='weighted')
+    rf_train_acc = accuracy_score(y_train, rf_best.predict(X_train))
+    rf_test_acc = accuracy_score(y_test, rf_test_pred)
+    rf_cm = confusion_matrix(y_test, rf_test_pred)
+    plot_confusion_matrix(rf_cm, sorted(y_test.unique()), 'Random Forest Confusion Matrix', 'pokemon_rf_cm.png')
+    rf_cm_analysis = analyze_confusion_matrix(rf_cm, sorted(y_test.unique()))
+    print("Random Forest Confusion Matrix Analysis:\n", rf_cm_analysis)
+    plot_feature_importance(rf_best, features, 'Random Forest Feature Importance (Pokémon)', 'pokemon_rf_feature_importance.png')
+    plot_param_tuning(rf_grid, 'max_depth', 'Random Forest Max Depth Tuning (Pokémon)', 'pokemon_rf_max_depth_tuning.png', 'F1 Score')
+    rf_cv_scores = cross_val_score(rf_best, X_train, y_train, cv=5, scoring='f1_weighted')
+    print("Random Forest CV F1 Scores:", rf_cv_scores, "Mean:", rf_cv_scores.mean(), "Std:", rf_cv_scores.std())
+    results.append(('Random Forest', rf_grid.best_params_, rf_train_f1, rf_test_f1, rf_train_acc, rf_test_acc, train_time, rf_cm))
+    models.append(('Random Forest', rf_best))
+    before_scores_f1.append(rf_default_test_f1)
+    after_scores_f1.append(rf_test_f1)
+    before_scores_acc.append(rf_default_test_acc)
+    after_scores_acc.append(rf_test_acc)
+    model_names.append('Random Forest')
+
+    print("Training KNN...")
+    knn_default = KNeighborsClassifier()
+    start_time = time.time()
+    knn_default.fit(X_train, y_train)
+    train_time = time.time() - start_time
+    knn_default_train_pred = knn_default.predict(X_train)
+    knn_default_test_pred = knn_default.predict(X_test)
+    knn_default_train_f1 = f1_score(y_train, knn_default_train_pred, average='weighted')
+    knn_default_test_f1 = f1_score(y_test, knn_default_test_pred, average='weighted')
+    knn_default_train_acc = accuracy_score(y_train, knn_default_train_pred)
+    knn_default_test_acc = accuracy_score(y_test, knn_default_test_pred)
+    knn_params = {'n_neighbors': [3, 5], 'weights': ['uniform']}
+    knn_grid = GridSearchCV(KNeighborsClassifier(), knn_params, cv=5, scoring='f1_weighted')
+    knn_grid.fit(X_train, y_train)
+    knn_best = knn_grid.best_estimator_
+    knn_test_pred = knn_best.predict(X_test)
+    knn_train_f1 = f1_score(y_train, knn_best.predict(X_train), average='weighted')
+    knn_test_f1 = f1_score(y_test, knn_test_pred, average='weighted')
+    knn_train_acc = accuracy_score(y_train, knn_best.predict(X_train))
+    knn_test_acc = accuracy_score(y_test, knn_test_pred)
+    knn_cm = confusion_matrix(y_test, knn_test_pred)
+    plot_confusion_matrix(knn_cm, sorted(y_test.unique()), 'KNN Confusion Matrix', 'pokemon_knn_cm.png')
+    knn_cm_analysis = analyze_confusion_matrix(knn_cm, sorted(y_test.unique()))
+    print("KNN Confusion Matrix Analysis:\n", knn_cm_analysis)
+    plot_param_tuning(knn_grid, 'n_neighbors', 'KNN n_neighbors Tuning (Pokémon)', 'pokemon_knn_n_neighbors_tuning.png', 'F1 Score')
+    knn_cv_scores = cross_val_score(knn_best, X_train, y_train, cv=5, scoring='f1_weighted')
+    print("KNN CV F1 Scores:", knn_cv_scores, "Mean:", knn_cv_scores.mean(), "Std:", knn_cv_scores.std())
+    results.append(('KNN', knn_grid.best_params_, knn_train_f1, knn_test_f1, knn_train_acc, knn_test_acc, train_time, knn_cm))
+    models.append(('KNN', knn_best))
+    before_scores_f1.append(knn_default_test_f1)
+    after_scores_f1.append(knn_test_f1)
+    before_scores_acc.append(knn_default_test_acc)
+    after_scores_acc.append(knn_test_acc)
+    model_names.append('KNN')
+
+    print("Training Voting Classifier...")
+    voting_clf = VotingClassifier(
+        estimators=[('lr', lr_best), ('rf', rf_best), ('knn', knn_best)],
+        voting='soft',
+        weights=[1, 1, 1]
+    )
+    start_time = time.time()
+    voting_clf.fit(X_train, y_train)
+    train_time = time.time() - start_time
+    voting_test_pred = voting_clf.predict(X_test)
+    voting_train_f1 = f1_score(y_train, voting_clf.predict(X_train), average='weighted')
+    voting_test_f1 = f1_score(y_test, voting_test_pred, average='weighted')
+    voting_train_acc = accuracy_score(y_train, voting_clf.predict(X_train))
+    voting_test_acc = accuracy_score(y_test, voting_test_pred)
+    voting_cm = confusion_matrix(y_test, voting_test_pred)
+    plot_confusion_matrix(voting_cm, sorted(y_test.unique()), 'Voting Classifier Confusion Matrix', 'pokemon_voting_cm.png')
+    voting_cm_analysis = analyze_confusion_matrix(voting_cm, sorted(y_test.unique()))
+    print("Voting Classifier Confusion Matrix Analysis:\n", voting_cm_analysis)
+    plot_learning_curve(voting_clf, X_train, y_train, 'Voting Classifier Learning Curve', 'pokemon_voting_learning_curve.png', cv=5, scoring='f1_weighted')
+    voting_cv_scores = cross_val_score(voting_clf, X_train, y_train, cv=5, scoring='f1_weighted')
+    print("Voting Classifier CV F1 Scores:", voting_cv_scores, "Mean:", voting_cv_scores.mean(), "Std:", voting_cv_scores.std())
+    results.append(('Voting Classifier', {'voting': 'soft', 'weights': [1, 1, 1]}, voting_train_f1, voting_test_f1, voting_train_acc, voting_test_acc, train_time, voting_cm))
+    models.append(('Voting Classifier', voting_clf))
+    before_scores_f1.append(voting_test_f1)
+    after_scores_f1.append(voting_test_f1)
+    before_scores_acc.append(voting_test_acc)
+    after_scores_acc.append(voting_test_acc)
+    model_names.append('Voting Classifier')
+
+    plot_tuning_comparison(before_scores_f1, after_scores_f1, model_names, 'Pokémon F1 Score Tuning Comparison', 'pokemon_tuning_comparison_f1.png', metric='F1 Score')
+    plot_tuning_comparison(before_scores_acc, after_scores_acc, model_names, 'Pokémon Accuracy Tuning Comparison', 'pokemon_tuning_comparison_acc.png', metric='Accuracy')
+
+    print("Pokémon training complete!")
+    with open('plots/pokemon_results.txt', 'w') as f:
+        for model, params, train_f1, test_f1, train_acc, test_acc, train_time, cm in results:
+            f.write(f'{model}:\nBest Params: {params}\nTrain F1 Score: {train_f1:.3f}\nTest F1 Score: {test_f1:.3f}\nTrain Accuracy: {train_acc:.3f}\nTest Accuracy: {test_acc:.3f}\nTrain Time: {train_time:.3f}s\nConfusion Matrix:\n{cm}\n\n')
+    return results
+
+# Main execution
+if __name__ == '__main__':
+    gc.collect()
+    print("Starting League of Legends training (10% sample)...")
+    X_train_league, X_test_league, y_train_league, y_test_league, league_features = load_league_data()
+    league_results = train_league_models(X_train_league, X_test_league, y_train_league, y_test_league, league_features)
+
+    print("Starting Pokémon training...")
+    X_train_pokemon, X_test_pokemon, y_train_pokemon, y_test_pokemon, pokemon_features = load_pokemon_data()
+    pokemon_results = train_pokemon_models(X_train_pokemon, X_test_pokemon, y_train_pokemon, y_test_pokemon, pokemon_features)
+
+    print("Generating performance table...")
+    with open('plots/performance_table.txt', 'w') as f:
+        f.write('Model,League Train ROC-AUC,League Test ROC-AUC,League Train Accuracy,League Test Accuracy,Pokémon Train F1,Pokémon Test F1,Pokémon Train Accuracy,Pokémon Test Accuracy\n')
+        for (league_model, _, league_train_roc, league_test_roc, league_train_acc, league_test_acc, _, _), \
+            (pokemon_model, _, pokemon_train_f1, pokemon_test_f1, pokemon_train_acc, pokemon_test_acc, _, _) in zip(league_results, pokemon_results):
+            f.write(f'{league_model},{league_train_roc:.3f},{league_test_roc:.3f},{league_train_acc:.3f},{league_test_acc:.3f},'
+                    f'{pokemon_train_f1:.3f},{pokemon_test_f1:.3f},{pokemon_train_acc:.3f},{pokemon_test_acc:.3f}\n')
+    print("All training complete!")
